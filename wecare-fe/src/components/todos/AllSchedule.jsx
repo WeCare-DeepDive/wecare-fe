@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
 import { ICON_TYPES } from '../../constants/iconTypeConstants'; // 경로는 실제 구조에 맞게 조정
 import { Theme } from '../../styles/theme';
 import { useNavigation } from '@react-navigation/native';
 import useTodoStore from '../../store/todoStore';
 import { useDateFormat } from '../../hooks/useDateFormat';
-import { completeRoutine, undoCompleteRoutine } from '../../providers/api';
+import { completeRoutine, undoCompleteRoutine, getRoutine } from '../../providers/api';
 
 // TODO: 루틴 상세 화면 완성
 //- 여기서 필요한 데이터
@@ -19,36 +18,66 @@ const AllSchedule = ({
   isCard = true,
   role,
   isDetail = false,
-  onDataUpdate, // 데이터 업데이트 콜백 추가
+  routineId, // routineId prop 추가
 }) => {
-  console.log('🔍 AllSchedule scheduleData: ', scheduleData);
+  const [localScheduleData, setLocalScheduleData] = useState([]);
   const [selectedItems, setSelectedItems] = useState({});
+  const [loading, setLoading] = useState(true);
   const navigation = useNavigation();
   const {setTodoId} = useTodoStore();
   const { formatTimeRange,stringFormatTimeRange } = useDateFormat();
+  const [selectedItemsTest, setSelectedItemsTest] = useState({});
   
-  // 페이지가 포커스될 때마다 서버 호출
-  useFocusEffect(
-    React.useCallback(() => {
-      console.log('🔍 AllSchedule 화면 포커스 - 서버 호출');
-      if (onDataUpdate) {
-        onDataUpdate();
+  // 컴포넌트 마운트 시 데이터 로드
+  useEffect(() => {
+    if (routineId) {
+      loadRoutineData();
+    } else if (scheduleData.length > 0) {
+      setLocalScheduleData(scheduleData);
+      setLoading(false);
+      // 초기 selectedItems 설정
+      const initialSelectedItems = {};
+      scheduleData.forEach(item => {
+        const isCompleted = item.history !== null;
+        if (isCompleted) {
+          initialSelectedItems[item.id] = true;
+        }
+      });
+      setSelectedItemsTest(initialSelectedItems);
+      setSelectedItems(initialSelectedItems);
+    }
+  }, [routineId, scheduleData]);
+
+  // 루틴 데이터 로드 함수
+  const loadRoutineData = async () => {
+    try {
+      setLoading(true);
+      console.log('🔍 AllSchedule loadRoutineData routineId: ', routineId);
+      const response = await getRoutine(routineId);
+      console.log('🔍 AllSchedule loadRoutineData response: ', response);
+      
+      if (response.status === 200) {
+        const data = Array.isArray(response.data) ? response.data : [response.data];
+        console.log('🔍 AllSchedule loadRoutineData data: ', data);
+        setLocalScheduleData(data);
+        
+        // selectedItems는 handleComplete에서 직접 관리하므로 여기서는 설정하지 않음
+        console.log('🔍 AllSchedule 데이터 로드 완료');
       }
-    }, [onDataUpdate])
-  );
+    } catch (error) {
+      console.error('❌ AllSchedule loadRoutineData error: ', error);
+    } finally {
+      setLoading(false);
+    }
+  };
   
   // scheduleData가 변경될 때마다 로컬 상태를 서버 데이터와 동기화
   useEffect(() => {
-    const newSelectedItems = {};
-    scheduleData.forEach(item => {
-      // 서버 데이터에서 완료 여부 확인
-      const isCompleted = item.history !== null;
-      if (isCompleted) {
-        newSelectedItems[item.id] = true;
-      } 
-    });
-    setSelectedItems(newSelectedItems);
-  }, [scheduleData]);
+    if (localScheduleData.length > 0) {
+      // selectedItems는 handleComplete에서 직접 관리하므로 여기서는 설정하지 않음
+      console.log('🔍 useEffect localScheduleData 업데이트 완료');
+    }
+  }, [localScheduleData]);
 
   const toggleItem = (itemKey) => {
     const newSelectedItems = {
@@ -95,25 +124,37 @@ const AllSchedule = ({
   // 완료 처리 함수
   const handleComplete = async (item) => {
     console.log('🔍 handleComplete item: ', item);
+    
     // 수행 된 것인지 판단
     console.log('🔍 handleComplete item.id: ', item.id);
     if(item.history === null) {
+      console.log('🔍 루틴 완료 처리 시작');
       const response = await completeRoutine(item.id);
       console.log('🔍 handleComplete response: ', response);
       if(response.status === 200) {
-      // 데이터 업데이트
-      if (onDataUpdate) {
-        onDataUpdate(); // 부모 컴포넌트에 데이터 업데이트 요청
+        console.log('🔍 루틴 완료 성공 - 상태 직접 업데이트');
+        // 상태 직접 업데이트
+        setSelectedItems(prev => ({
+          ...prev,
+          [item.id]: true
+        }));
+        // 데이터 다시 로드
+        await loadRoutineData();
       }
-     }
     } else {
+      console.log('🔍 루틴 완료 해제 처리 시작');
       const response = await undoCompleteRoutine(item.history.id);
       console.log('🔍 handleComplete response: ', response);
       if(response.status === 200) {
-        // 데이터 업데이트
-        if (onDataUpdate) {
-          onDataUpdate(); // 부모 컴포넌트에 데이터 업데이트 요청
-        }
+        console.log('🔍 루틴 완료 해제 성공 - 상태 직접 업데이트');
+        // 상태 직접 업데이트
+        setSelectedItems(prev => {
+          const newState = { ...prev };
+          delete newState[item.id];
+          return newState;
+        });
+        // 데이터 다시 로드
+        await loadRoutineData();
       }
     }
   }
@@ -126,15 +167,17 @@ const AllSchedule = ({
     console.log('🔍 AllSchedule isCompleted: ', isCompleted);
     
     // 체크박스 상태 결정 - 서버 데이터 우선, 로컬 상태는 보조
-    const isChecked = isCompleted || selectedItems[item.id] || false;
+    // const isChecked = isCompleted || selectedItems[item.id] || false;
+    const isChecked =  selectedItemsTest[item.id] || false;
     console.log('🔍 isChecked: ', isChecked, 'isCompleted: ', isCompleted, 'selectedItems[item.id]: ', selectedItems[item.id]);
+    console.log('🔍 전체 selectedItems: ', selectedItems);
 
     // 아이콘 색상 확인 - type 또는 routineType 둘 다 지원
     const iconType = item.type || item.routineType;
     const iconBackgroundColor = getDefaultIconColor(iconType);
     
     // 마지막 아이템인지 확인 (활성화된 아이템 기준)
-    const isLastItem = index === scheduleData.length - 1;
+    const isLastItem = index === localScheduleData.length - 1;
 
     // 스타일 결정 - completedItem 스타일 제거
     const itemStyle = [
@@ -182,6 +225,7 @@ const AllSchedule = ({
           style={styles.checkboxContainer} 
           onPress={() => {
             handleComplete(item);
+            toggleItem(item.id);
           }}
         >
           <View style={[styles.checkbox, isChecked && styles.checkedBox]}>
@@ -194,7 +238,13 @@ const AllSchedule = ({
 
   return (
     <View style={styles.container}>
-      {scheduleData.map((item, index) => renderScheduleItem(item, index))}
+      {console.log('🔍 AllSchedule 렌더링 - localScheduleData 길이: ', localScheduleData.length)}
+      {console.log('🔍 AllSchedule 렌더링 - selectedItems: ', selectedItems)}
+      {loading ? (
+        <Text>Loading...</Text>
+      ) : (
+        localScheduleData.map((item, index) => renderScheduleItem(item, index))
+      )}
     </View>
   );
 };
